@@ -1,0 +1,28 @@
+| Component                         | Responsibility                                          |
+| --------------------------------- | ------------------------------------------------------- |
+| `12_monitor_trigger.py`           | Detect whether monitoring conditions require retraining |
+| `churn_prediction_pipeline.py`    | Execute the ML training/lifecycle pipeline              |
+| `08_automate_lifecycle.py`        | Decide whether candidate becomes Production             |
+| `deploy_if_promoted.py`           | Deploy only when lifecycle says promotion happened      |
+| `deployment/deploy_production.py` | Build/load/update Kubernetes deployment                 |
+| GitHub Actions                    | Schedule/launch monitoring workflow                     |
+| Self-hosted runner                | Execute everything on your Windows machine              |
+| FastAPI                           | Serve predictions                                       |
+| MLflow                            | Track runs and manage model versions                    |
+| Kubernetes                        | Run the containerized API                               |
+
+
+LOCAL DEMONSTRATION COMMANDS
+
+    docker info
+    docker ps --filter "name=^/churn-api$"
+    Invoke-RestMethod http://localhost:8000/health
+    Invoke-RestMethod http://localhost:8000/metadata
+    Start-Process http://localhost:8000/docs
+    .\.venv\Scripts\python.exe -m pytest -q
+    .\.venv\Scripts\python.exe -m tests.test_local_vs_container
+    .\.venv\Scripts\python.exe src\mlops_pipeline\12_monitor_trigger.py
+
+The retraining trigger uses the ingested batch hash in
+data\raw\archive\dataset_lineage.json. A previously ingested batch is
+skipped safely.
