@@ -9,9 +9,7 @@ COPY requirements-api.txt .
 
 RUN pip install --no-cache-dir -r requirements-api.txt
 
-COPY api/ ./api/
-COPY deployment/ ./deployment/
-COPY config.yaml .
+COPY . .
 
 EXPOSE 8000
 
