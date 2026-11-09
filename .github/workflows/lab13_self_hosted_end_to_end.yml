@@ -1,0 +1,149 @@
+name: Lab 13 - Churn Self-Hosted End-to-End
+
+on:
+  workflow_dispatch:
+    inputs:
+      deploy_to_kubernetes:
+        description: Deploy the tested image to the runner's Kubernetes cluster
+        required: true
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: churn-self-hosted-end-to-end
+  cancel-in-progress: false
+
+jobs:
+  end-to-end:
+    runs-on: [self-hosted, Windows, X64]
+    defaults:
+      run:
+        shell: pwsh
+    env:
+      IMAGE_NAME: churn-prediction-api
+      IMAGE_TAG: ${{ github.sha }}
+      CONTAINER_NAME: churn-api-${{ github.run_id }}
+      MLFLOW_TRACKING_URI: ${{ secrets.MLFLOW_TRACKING_URI }}
+    steps:
+      - name: Checkout project
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Check self-hosted tools
+        run: |
+          python --version
+          docker info
+
+      - name: Install dependencies
+        run: python -m pip install -r requirements.txt
+
+      - name: Run Labs 1-12 churn lifecycle
+        run: python src/mlops_pipeline/churn_prediction_pipeline.py --force
+
+      - name: Run API and monitoring tests
+        run: python -m pytest tests -q
+
+      - name: Build container
+        run: docker build --tag "$env:IMAGE_NAME`:$env:IMAGE_TAG" .
+
+      - name: Smoke-test container
+        run: |
+          $listener = [System.Net.Sockets.TcpListener]::new([System.Net.IPAddress]::Loopback, 0)
+          $listener.Start()
+          $port = $listener.LocalEndpoint.Port
+          $listener.Stop()
+          $env:CHURN_API_PORT = "$port"
+          docker run --detach --rm --name $env:CONTAINER_NAME --publish "127.0.0.1:${port}:8000" "$env:IMAGE_NAME`:$env:IMAGE_TAG"
+          if ($LASTEXITCODE -ne 0) { throw "Could not start the API container." }
+          $baseUrl = "http://127.0.0.1:$port"
+          $ready = $false
+          for ($attempt = 0; $attempt -lt 30; $attempt++) {
+            try {
+              $health = Invoke-RestMethod -Uri "$baseUrl/health" -TimeoutSec 3
+              if ($health.status -eq "healthy") { $ready = $true; break }
+            } catch {
+              Start-Sleep -Seconds 2
+            }
+          }
+          if (-not $ready) {
+            docker logs $env:CONTAINER_NAME
+            throw "Churn API container did not become healthy."
+          }
+          $customer = @{
+            customerID = "7590-VHVEG"
+            gender = "Female"
+            SeniorCitizen = 0
+            Partner = "Yes"
+            Dependents = "No"
+            tenure = 1
+            PhoneService = "No"
+            MultipleLines = "No phone service"
+            InternetService = "DSL"
+            OnlineSecurity = "No"
+            OnlineBackup = "Yes"
+            DeviceProtection = "No"
+            TechSupport = "No"
+            StreamingTV = "No"
+            StreamingMovies = "No"
+            Contract = "Month-to-month"
+            PaperlessBilling = "Yes"
+            PaymentMethod = "Electronic check"
+            MonthlyCharges = 29.85
+            TotalCharges = "29.85"
+          } | ConvertTo-Json
+          $prediction = Invoke-RestMethod -Uri "$baseUrl/predict" -Method Post -ContentType "application/json" -Body $customer
+          if ($prediction.prediction -notin @(0, 1)) { throw "Churn prediction smoke test returned an invalid class." }
+          if ($prediction.churn_probability -lt 0 -or $prediction.churn_probability -gt 1) {
+            throw "Churn prediction smoke test returned an invalid probability."
+          }
+          Write-Host "Container health and churn prediction passed."
+
+      - name: Deploy to Kubernetes
+        if: ${{ inputs.deploy_to_kubernetes }}
+        run: |
+          $context = kubectl config current-context
+          if ($LASTEXITCODE -ne 0 -or -not $context) {
+            throw "Configure a Kubernetes context on the self-hosted runner before deployment."
+          }
+          docker tag "$env:IMAGE_NAME`:$env:IMAGE_TAG" "$env:IMAGE_NAME`:1.0"
+          if ($LASTEXITCODE -ne 0) { throw "Could not tag the Kubernetes image." }
+          kubectl apply -f k8s/deployment.yaml
+          if ($LASTEXITCODE -ne 0) { throw "Kubernetes deployment manifest failed." }
+          kubectl apply -f k8s/service.yaml
+          if ($LASTEXITCODE -ne 0) { throw "Kubernetes service manifest failed." }
+          kubectl rollout status deployment/churn-api --timeout=180s
+          if ($LASTEXITCODE -ne 0) { throw "Kubernetes rollout failed." }
+
+      - name: Collect deployment diagnostics
+        if: ${{ failure() && inputs.deploy_to_kubernetes }}
+        run: |
+          kubectl get pods,services
+          kubectl describe deployment/churn-api
+          kubectl logs deployment/churn-api --all-containers=true
+
+      - name: Stop smoke-test container
+        if: always()
+        run: |
+          docker rm --force $env:CONTAINER_NAME
+          if ($LASTEXITCODE -ne 0) { Write-Host "Smoke-test container was already stopped." }
+
+      - name: Upload churn workflow evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: churn-lab13-${{ github.run_number }}
+          path: |
+            artifacts/**
+            reports/**
+            outputs/**
+            logs/**
+            deployment/model_metadata.json
+          if-no-files-found: warn
